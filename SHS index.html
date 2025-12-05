@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Hunting Prototype — Rabbit / Deer / Bear</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+ html,body { height:100%; margin:0; overflow:hidden; font-family: Arial, sans-serif; background:#111; color:#eee }
+ #overlay {
+   position: absolute; left:10px; top:10px; z-index: 10;
+   background: rgba(0,0,0,0.35); padding:10px; border-radius:6px;
+   min-width:220px;
+ }
+ #hud { line-height:1.4 }
+ #shop {
+   position: absolute; right: 10px; top: 10px; z-index: 11;
+   background: rgba(0,0,0,0.5); padding:12px; border-radius:6px; display:none;
+   min-width:250px;
+ }
+ button { padding:8px 10px; margin:6px 0; width:100%; border-radius:4px; border:1px solid #888; background:#222; color:#fff; cursor:pointer }
+ button:disabled { opacity:0.4; cursor:not-allowed }
+ #message { position: absolute; left:50%; transform:translateX(-50%); top:20px; z-index:12; background: rgba(0,0,0,0.6); padding:8px 12px; border-radius:4px; display:none; }
+ #canvas-container { width:100%; height:100%; display:block }
+ .small { font-size:12px; color:#ccc }
+ .stat { margin-top:8px }
+ .animal-label { font-weight:bold; }
+ #credits { position:absolute; left:10px; bottom:10px; font-size:12px; color:#bbb; opacity:0.9 }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="overlay">
+<div id="hud">
+<div>Money: $<span id="money">100</span></div>
+<div>Weapon level: <span id="wlevel">1</span></div>
+<div>Damage: <span id="wdamage">25</span></div>
+<div>Fire rate: <span id="wfire">0.6</span> s</div>
+<div class="stat">Kills — Rabbit: <span id="killR">0</span>, Deer: <span id="killD">0</span>, Bear: <span id="killB">0</span></div>
+<div class="small">Controls: WASD move • Mouse look • Click shoot • E open shop</div>
+</div>
+</div>
+<div id="shop">
+<h3>Shop</h3>
+<div class="small">Spend money to upgrade your weapon.</div>
+<div style="margin-top:8px">
+<div class="animal-label">Upgrade Weapon Damage</div>
+<div class="small">Costs increase per level.</div>
+<button id="buy-dmg">Buy +25 Damage ($200)</button>
+<div class="animal-label" style="margin-top:8px">Upgrade Fire Rate</div>
+<div class="small">Lower is faster</div>
+<button id="buy-fire">Reduce fire cooldown by 0.1s ($300)</button>
+<div class="animal-label" style="margin-top:8px">Buy Stamina / Speed</div>
+<button id="buy-speed">Increase run speed by 1 ($250)</button>
+</div>
+</div>
+<div id="message"></div>
+<div id="credits">Prototype — low-poly placeholders. Replace with real models & sounds.</div>
+<!-- Libraries -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/controls/PointerLockControls.js"></script>
+<script>
+/*
+Hunting Prototype
+- Three.js first-person basic world.
+- Animals: rabbit ($50), deer ($500), bear ($5000)
+- Simple shop/upgrades and raycast shooting
+- Non-graphic "death" (fade out). Animals respawn.
+- Comments inside explain where to swap in real assets.
+How to extend:
+- Replace animal boxes with GLTF/GLB models (use GLTFLoader).
+- Add audio via AudioListener & Audio.
+- Improve AI: navmesh or pathfinding libraries for complex terrain.
+*/
+(() => {
+ // GAME CONFIG
+ const CONFIG = {
+   startMoney: 100,
+   animalTypes: {
+     rabbit: { price: 50, hp: 20, color: 0xffffff, size: 0.6, speed: 1.8, fleeDist: 10, respawn: 8 },
+     deer:   { price: 500, hp: 80,  color: 0x996633, size: 1.5, speed: 1.2, fleeDist: 14, respawn: 12 },
+     bear:   { price: 5000, hp: 400, color: 0x333333, size: 2.2, speed: 0.9, fleeDist: 18, respawn: 18 }
+   },
+   maxAnimals: 10,
+   worldSize: 200 // square half-size
+ };
+ // STATE
+ let state = {
+   money: CONFIG.startMoney,
+   killCounts: { rabbit:0, deer:0, bear:0 },
+   weapon: { level:1, damage:25, fireCooldown:0.6, lastShot: -999, speedBonus: 0 },
+   animals: [],
+   sceneReady: false
+ };
+ // DOM refs
+ const dom = {
+   money: document.getElementById('money'),
+   wlevel: document.getElementById('wlevel'),
+   wdamage: document.getElementById('wdamage'),
+   wfire: document.getElementById('wfire'),
+   shop: document.getElementById('shop'),
+   buyDmg: document.getElementById('buy-dmg'),
+   buyFire: document.getElementById('buy-fire'),
+   buySpeed: document.getElementById('buy-speed'),
+   msg: document.getElementById('message'),
+   killR: document.getElementById('killR'),
+   killD: document.getElementById('killD'),
+   killB: document.getElementById('killB')
+ };
+ // THREE.js basic setup
+ const container = document.getElementById('canvas-container');
+ const renderer = new THREE.WebGLRenderer({ antialias: true });
+ renderer.setSize(window.innerWidth, window.innerHeight);
+ renderer.setPixelRatio(window.devicePixelRatio ? window.devicePixelRatio : 1);
+ container.appendChild(renderer.domElement);
+ const scene = new THREE.Scene();
+ scene.background = new THREE.Color(0x87ceeb); // sky color
+ const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+ camera.position.set(0, 1.6, 0);
+ // Lights
+ const hemi = new THREE.HemisphereLight(0xffffbb, 0x444455, 1.0);
+ hemi.position.set(0, 50, 0);
+ scene.add(hemi);
+ const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+ dir.position.set(-10,20,10);
+ scene.add(dir);
+ // Ground
+ const groundMat = new THREE.MeshStandardMaterial({ color: 0x228833 });
+ const groundGeo = new THREE.PlaneGeometry(CONFIG.worldSize*2, CONFIG.worldSize*2, 1, 1);
+ const ground = new THREE.Mesh(groundGeo, groundMat);
+ ground.rotation.x = -Math.PI/2;
+ ground.receiveShadow = true;
+ scene.add(ground);
+ // Simple sky horizon (distant fog)
+ scene.fog = new THREE.Fog(0x87ceeb, 50, 300);
+ // Player controls
+ const controls = new THREE.PointerLockControls(camera, renderer.domElement);
+ document.addEventListener('click', () => {
+   if (!controls.isLocked) {
+     controls.lock();
+   }
+ });
+ // Movement
+ const move = { forward:0, backward:0, left:0, right:0, sprint:false };
+ const velocity = new THREE.Vector3();
+ document.addEventListener('keydown', (e) => {
+   if (e.code === 'KeyW') move.forward = 1;
+   if (e.code === 'KeyS') move.backward = 1;
+   if (e.code === 'KeyA') move.left = 1;
+   if (e.code === 'KeyD') move.right = 1;
+   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') move.sprint = true;
+   if (e.code === 'KeyE') toggleShop();
+ });
+ document.addEventListener('keyup', (e) => {
+   if (e.code === 'KeyW') move.forward = 0;
+   if (e.code === 'KeyS') move.backward = 0;
+   if (e.code === 'KeyA') move.left = 0;
+   if (e.code === 'KeyD') move.right = 0;
+   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') move.sprint = false;
+ });
+ // Basic world obstacles (optional) - none for simplicity
+ // Animal class
+ class Animal {
+   constructor(typeKey, pos) {
+     this.typeKey = typeKey;
+     const cfg = CONFIG.animalTypes[typeKey];
+     this.cfg = cfg;
+     this.maxHp = cfg.hp;
+     this.hp = cfg.hp;
+     this.pos = pos.clone();
+     this.mesh = this.createMesh(cfg);
+     this.mesh.position.copy(this.pos);
+     scene.add(this.mesh);
+     this.dead = false;
+     this.respawnTimer = 0;
+     this.moveTarget = this.getRandomTarget();
+     this.speed = cfg.speed;
+     this.fade = 1;
+   }
+   createMesh(cfg) {
+     // Placeholder: simple low-poly shape
+     const geo = new THREE.BoxGeometry(cfg.size, cfg.size*0.6, cfg.size*0.4);
+     const mat = new THREE.MeshStandardMaterial({ color: cfg.color });
+     const mesh = new THREE.Mesh(geo, mat);
+     // Add a small "head" sphere for visual variety
+     const headGeo = new THREE.SphereGeometry(cfg.size*0.22, 8, 8);
+     const head = new THREE.Mesh(headGeo, new THREE.MeshStandardMaterial({ color: 0x222222 }));
+     head.position.set(cfg.size*0.5, cfg.size*0.15, 0);
+     mesh.add(head);
+     mesh.castShadow = true;
+     mesh.userData.animal = this;
+     return mesh;
+   }
+   getRandomTarget() {
+     const range = CONFIG.worldSize - 10;
+     return new THREE.Vector3(
+       (Math.random()*2-1)*range,
+       0,
+       (Math.random()*2-1)*range
+     );
+   }
+   update(dt, playerPos) {
+     if (this.dead) {
+       this.respawnTimer -= dt;
+       if (this.respawnTimer <= 0) this.respawn();
+       // fade out while dead
+       this.fade = Math.max(0, this.fade - dt*0.5);
+       this.mesh.material.opacity = this.fade;
+       this.mesh.material.transparent = true;
+       return;
+     }
+     // Simple flee behavior
+     const toPlayer = new THREE.Vector3().subVectors(playerPos, this.mesh.position);
+     const dist = toPlayer.length();
+     if (dist < this.cfg.fleeDist) {
+       // Run away from player
+       const dir = new THREE.Vector3().subVectors(this.mesh.position, playerPos).normalize();
+       this.mesh.position.addScaledVector(dir, (this.speed + 1.0) * dt * 1.5);
+     } else {
+       // wander toward moveTarget
+       const toTarget = new THREE.Vector3().subVectors(this.moveTarget, this.mesh.position);
+       if (toTarget.length() < 1) this.moveTarget = this.getRandomTarget();
+       const dir = toTarget.normalize();
+       this.mesh.position.addScaledVector(dir, this.speed * dt);
+     }
+     // Keep on ground
+     this.mesh.position.y = 0.25;
+     // rotate to move direction
+     const vel = new THREE.Vector3();
+     vel.copy(this.moveTarget).sub(this.mesh.position);
+     if (vel.lengthSq() > 0.001) {
+       const ang = Math.atan2(vel.x, vel.z);
+       this.mesh.rotation.y = ang;
+     }
+   }
+   takeDamage(amount) {
+     if (this.dead) return false;
+     this.hp -= amount;
+     if (this.hp <= 0) {
+       this.die();
+       return true;
+     }
+     return false;
+   }
+   die() {
+     this.dead = true;
+     // award money handled by game code
+     // visually scale down and fade
+     this.respawnTimer = this.cfg.respawn;
+   }
+   respawn() {
+     // reposition and revive
+     const range = CONFIG.worldSize - 12;
+     this.mesh.position.set((Math.random()*2-1)*range, 0.25, (Math.random()*2-1)*range);
+     this.hp = this.maxHp;
+     this.dead = false;
+     this.fade = 1;
+     this.mesh.material.opacity = 1;
+     this.mesh.material.transparent = false;
+     this.moveTarget = this.getRandomTarget();
+   }
+   dispose() {
+     scene.remove(this.mesh);
+     this.mesh.geometry.dispose();
+     if (this.mesh.material) this.mesh.material.dispose();
+   }
+ }
+ // Animal management
+ function spawnAnimals() {
+   // create a set of animals across types, limited by max
+   const spawnList = [];
+   const keys = Object.keys(CONFIG.animalTypes);
+   for (let i=0;i<CONFIG.maxAnimals;i++) {
+     const typeKey = keys[Math.floor(Math.random()*keys.length)];
+     const range = CONFIG.worldSize - 12;
+     const pos = new THREE.Vector3((Math.random()*2-1)*range, 0.25, (Math.random()*2-1)*range);
+     spawnList.push(new Animal(typeKey, pos));
+   }
+   state.animals = spawnList;
+ }
+ // Raycast shooting
+ const raycaster = new THREE.Raycaster();
+ function shoot() {
+   const now = performance.now()/1000;
+   if (now - state.weapon.lastShot < state.weapon.fireCooldown) return;
+   state.weapon.lastShot = now;
+   // fire a ray from camera center
+   raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+   const intersects = raycaster.intersectObjects(state.animals.map(a=>a.mesh), false);
+   if (intersects.length > 0) {
+     const hit = intersects[0];
+     const animal = hit.object.userData.animal;
+     if (!animal) return;
+     const killed = animal.takeDamage(state.weapon.damage);
+     if (killed) {
+       awardForKill(animal.typeKey);
+       // optional small pop effect
+       animateKillPopup(hit.point, animal.typeKey);
+     }
+   }
+   // visual recoil/flash (simple)
+   flashShoot();
+ }
+ function awardForKill(typeKey) {
+   const amt = CONFIG.animalTypes[typeKey].price;
+   state.money += amt;
+   state.killCounts[typeKey]++;
+   updateHUD();
+   showMessage(`+ $${amt} for a ${typeKey}!`);
+ }
+ // HUD and UI
+ function updateHUD() {
+   dom.money.textContent = state.money;
+   dom.wlevel.textContent = state.weapon.level;
+   dom.wdamage.textContent = state.weapon.damage;
+   dom.wfire.textContent = state.weapon.fireCooldown.toFixed(2);
+   dom.killR.textContent = state.killCounts.rabbit;
+   dom.killD.textContent = state.killCounts.deer;
+   dom.killB.textContent = state.killCounts.bear;
+ }
+ function showMessage(txt, t=2200) {
+   dom.msg.textContent = txt;
+   dom.msg.style.display = 'block';
+   setTimeout(()=> dom.msg.style.display = 'none', t);
+ }
+ function toggleShop() {
+   dom.shop.style.display = dom.shop.style.display === 'none' ? 'block' : 'none';
+ }
+ // Shop buttons
+ dom.buyDmg.addEventListener('click', () => {
+   const cost = 200 + (state.weapon.level-1)*100;
+   if (state.money < cost) { showMessage('Not enough money'); return; }
+   state.money -= cost;
+   state.weapon.damage += 25;
+   state.weapon.level += 1;
+   updateHUD();
+   showMessage('Weapon damage increased!');
+ });
+ dom.buyFire.addEventListener('click', () => {
+   const cost = 300 + (state.weapon.level-1)*150;
+   if (state.money < cost) { showMessage('Not enough money'); return; }
+   if (state.weapon.fireCooldown <= 0.2) { showMessage('Max fire rate reached'); return; }
+   state.money -= cost;
+   state.weapon.fireCooldown = Math.max(0.15, state.weapon.fireCooldown - 0.1);
+   updateHUD();
+   showMessage('Fire rate improved!');
+ });
+ dom.buySpeed.addEventListener('click', () => {
+   const cost = 250;
+   if (state.money < cost) { showMessage('Not enough money'); return; }
+   state.money -= cost;
+   state.weapon.speedBonus += 1;
+   updateHUD();
+   showMessage('Run speed increased!');
+ });
+ // Simple visual effects for shooting
+ let flashTimer = 0;
+ function flashShoot() {
+   flashTimer = 0.08;
+ }
+ // pop text for kill (simple)
+ function animateKillPopup(pos, type) {
+   // create a temporary sprite-like text (DOM)
+   const el = document.createElement('div');
+   el.textContent = `+ $${CONFIG.animalTypes[type].price}`;
+   el.style.position='absolute';
+   el.style.pointerEvents='none';
+   el.style.color='#ffb';
+   el.style.fontWeight='bold';
+   el.style.textShadow='0 0 6px black';
+   document.body.appendChild(el);
+   let life = 1.1;
+   const update = () => {
+     life -= 0.016;
+     if (life <= 0) { document.body.removeChild(el); return; }
+     // project pos to screen
+     const screen = pos.clone().project(camera);
+     const x = (0.5 + screen.x/2) * window.innerWidth;
+     const y = (0.5 - screen.y/2) * window.innerHeight;
+     el.style.left = `${x}px`;
+     el.style.top = `${y - (1-life)*50}px`;
+     requestAnimationFrame(update);
+   };
+   update();
+ }
+ // Set up initial scene
+ spawnAnimals();
+ updateHUD();
+ // Shooting input
+ window.addEventListener('mousedown', (e) => {
+   if (e.button === 0) shoot();
+ });
+ // Resize handling
+ window.addEventListener('resize', onWindowResize);
+ function onWindowResize() {
+   camera.aspect = window.innerWidth/window.innerHeight;
+   camera.updateProjectionMatrix();
+   renderer.setSize(window.innerWidth, window.innerHeight);
+ }
+ // Main loop
+ let lastTime = performance.now();
+ function animate() {
+   const now = performance.now();
+   const dt = Math.min(0.05, (now - lastTime)/1000);
+   lastTime = now;
+   // movement update
+   if (controls.isLocked) {
+     // movement vector
+     const speed = 4 + state.weapon.speedBonus;
+     const moveMult = dt * (move.sprint ? speed*1.6 : speed);
+     const dir = new THREE.Vector3();
+     // forward/back
+     if (move.forward) dir.z -= move.forward;
+     if (move.backward) dir.z += move.backward;
+     if (move.left) dir.x -= move.left;
+     if (move.right) dir.x += move.right;
+     if (dir.lengthSq() > 0) {
+       dir.normalize();
+       // transform by camera rotation (y only)
+       const yaw = controls.getObject().rotation.y;
+       const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), yaw);
+       dir.applyQuaternion(quat);
+       controls.getObject().position.addScaledVector(dir, moveMult);
+       // clamp to world bounds
+       const p = controls.getObject().position;
+       p.x = Math.max(-CONFIG.worldSize+2, Math.min(CONFIG.worldSize-2, p.x));
+       p.z = Math.max(-CONFIG.worldSize+2, Math.min(CONFIG.worldSize-2, p.z));
+       p.y = 1.6;
+     }
+   }
+   // update animals
+   const playerPos = controls.getObject().position.clone();
+   for (const a of state.animals) a.update(dt, playerPos);
+   // flash effect
+   if (flashTimer > 0) {
+     flashTimer -= dt;
+     const factor = Math.min(1, flashTimer*12);
+     renderer.setClearColor(new THREE.Color(0x88aaff).lerp(scene.background, 1-factor));
+   } else {
+     renderer.setClearColor(scene.background);
+   }
+   renderer.render(scene, camera);
+   requestAnimationFrame(animate);
+ }
+ animate();
+ // Camera position sync with controls
+ controls.getObject().position.set(0,1.6,0);
+ // Add a small crosshair
+ const cross = document.createElement('div');
+ cross.style.position='absolute';
+ cross.style.left='50%';
+ cross.style.top='50%';
+ cross.style.transform='translate(-50%,-50%)';
+ cross.style.width='12px';
+ cross.style.height='12px';
+ cross.style.zIndex = 5;
+ cross.style.pointerEvents = 'none';
+ cross.style.borderLeft = '2px solid rgba(255,255,255,0.8)';
+ cross.style.borderTop = '2px solid rgba(255,255,255,0.8)';
+ cross.style.borderRight = '2px solid rgba(255,255,255,0.8)';
+ cross.style.borderBottom = '2px solid rgba(255,255,255,0.8)';
+ document.body.appendChild(cross);
+ // Small ground marker where player stands (for reference)
+ // (We parent the camera to controls and maintain position)
+ controls.getObject().position.set(0,1.6,0);
+ // Prevent pointer lock UI confusion
+ controls.addEventListener('lock', () => { showMessage('Controls locked — click & move to play.'); });
+ controls.addEventListener('unlock', () => { showMessage('Pointer unlocked. Click to re-lock.'); });
+ // Accessibility: initial tips
+ showMessage('Left-click to shoot. Press E to open shop.');
+ // Provide simple save of money/weapon to localStorage
+ window.addEventListener('beforeunload', () => {
+   const save = { money: state.money, weapon: state.weapon, kills:state.killCounts };
+   try { localStorage.setItem('huntSave', JSON.stringify(save)); } catch(e){}
+ });
+ // load saved
+ try {
+   const raw = localStorage.getItem('huntSave');
+   if (raw) {
+     const s = JSON.parse(raw);
+     state.money = s.money || state.money;
+     state.weapon = s.weapon || state.weapon;
+     state.killCounts = s.kills || state.killCounts;
+     updateHUD();
+   }
+ } catch (e) {}
+ // For debugging: show animal count on console
+ console.log('Hunting prototype started. Animals:', state.animals.length);
+})();
+</script>
+</body>
+</html>
